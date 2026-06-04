@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Emoji ASCII Renderer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body { margin:0; background:#111; color:#eee; font-family:system-ui,-apple-system,Segoe UI,sans-serif; display:grid; grid-template-columns:340px 1fr; min-height:100vh; }
+  aside { padding:18px; background:#181818; border-right:1px solid #333; }
+  label { display:grid; gap:5px; margin:12px 0; font-size:13px; }
+  label.check { display:flex; align-items:center; gap:8px; }
+  input[type="range"] { width:100%; }
+  input[type="text"], select { width:100%; box-sizing:border-box; padding:8px; font-size:14px; background:#262626; color:#fff; border:1px solid #555; border-radius:8px; }
+  #emoji { font-size:22px; }
+  input[type="color"] { width:100%; height:34px; padding:0; border:1px solid #555; border-radius:8px; background:#262626; cursor:pointer; }
+  input[type="checkbox"] { width:16px; height:16px; }
+  label:has(input:disabled), label:has(select:disabled) { opacity:.4; }
+  button { margin-top:10px; width:100%; padding:10px; border:1px solid #555; background:#262626; color:#fff; border-radius:8px; cursor:pointer; }
+  button:hover { background:#333; }
+
+  /* emoji keyboard */
+  .picker { position:relative; }
+  .pickrow { display:flex; gap:6px; }
+  .iconbtn { margin-top:0; width:auto; flex:0 0 auto; padding:6px 12px; font-size:18px; }
+  .panel { position:absolute; z-index:20; top:100%; left:0; right:0; margin-top:4px; max-height:280px; overflow-y:auto;
+           background:#202020; border:1px solid #555; border-radius:8px; padding:6px;
+           display:grid; grid-template-columns:repeat(8,1fr); gap:2px; box-shadow:0 8px 24px rgba(0,0,0,.5); }
+  .panel.hidden { display:none; }
+  .panel .cat { grid-column:1/-1; font-size:11px; color:#9a9a9a; padding:8px 4px 2px; }
+  .panel button { margin:0; width:auto; padding:3px; border:none; background:transparent; font-size:20px; border-radius:6px; cursor:pointer; }
+  .panel button:hover { background:#3a3a3a; }
+
+  main { display:grid; place-items:center; overflow:auto; padding:24px; }
+  canvas { max-width:min(92vh,92vw); max-height:92vh; background:black; box-shadow:0 0 40px rgba(255,255,255,.12); }
+  .small { color:#aaa; font-size:12px; line-height:1.35; }
+</style>
+</head>
+<body>
+<aside>
+  <h2>Emoji ASCII Renderer</h2>
+  <p class="small">Type or pick any emoji and render it as a glowing field of ASCII characters.</p>
+
+  <label>Emoji
+    <div class="picker">
+      <div class="pickrow">
+        <input id="emoji" type="text" value="🙂" maxlength="20" autocomplete="off" spellcheck="false">
+        <button id="emojiToggle" type="button" class="iconbtn" title="Pick an emoji">⌨️</button>
+      </div>
+      <div id="emojiPanel" class="panel hidden"></div>
+    </div>
+  </label>
+
+  <label>Letter size <span id="fontSizeVal"></span><input id="fontSize" type="range" min="8" max="30" value="18"></label>
+  <label>Density <span id="densityVal"></span><input id="density" type="range" min="35" max="100" value="85"></label>
+  <label>Contrast <span id="contrastVal"></span><input id="contrast" type="range" min="0" max="100" value="35"></label>
+  <label>Aura strength <span id="auraVal"></span><input id="aura" type="range" min="0" max="100" value="62"></label>
+  <label>Canvas size <span id="canvasSizeVal"></span><input id="canvasSize" type="range" min="1000" max="3000" value="2200" step="100"></label>
+  <label>Seed <span id="seedVal"></span><input id="seed" type="range" min="1" max="9999" value="2026"></label>
+
+  <label>Text mode
+    <select id="textMode">
+      <option value="random">Random characters</option>
+      <option value="words">Spell out words</option>
+      <option value="hidden">Hidden words</option>
+    </select>
+  </label>
+  <label>Words / message <input id="message" type="text" placeholder="e.g. you are loved" autocomplete="off"></label>
+
+  <label class="check"><input id="emojiColors" type="checkbox" checked> Use emoji colors</label>
+  <label>Color <input id="color" type="color" value="#ffd200"></label>
+
+  <button id="renderBtn">Render</button>
+  <button id="randomBtn">Randomize seed</button>
+  <button id="downloadBtn">Download JPG (under 1 MB)</button>
+</aside>
+
+<main><canvas id="c" width="2200" height="2200"></canvas></main>
+
+<script>
+const $ = id => document.getElementById(id);
+const canvas = $("c");
+const ctx = canvas.getContext("2d");
+
+function mulberry32(a) {
+  return function() {
+    let t = a += 0x6D2B79F5;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  }
+}
+
+const chars = "01ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%&*+-=<>?/{}[]";
+const EMOJI_FONT = '"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif';
+
+// --- color helpers: derive a tint/shade palette from one picked color ---
+function hexToRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function scale(rgb, f) { return rgb.map(c => Math.round(Math.min(255, c * f))); }       // f<1 darker
+function mix(rgb, other, t) { return rgb.map((c, i) => Math.round(c + (other[i] - c) * t)); } // toward `other`
+const rgb = c => `rgb(${c[0]},${c[1]},${c[2]})`;
+const rgbi = c => `rgb(${Math.min(255,Math.round(c[0]))},${Math.min(255,Math.round(c[1]))},${Math.min(255,Math.round(c[2]))})`;
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+
+// Brightness multiplier for a pixel of luminance L (0..1). Pivots around a high
+// point so darks get pushed down hard while brights lift only slightly — i.e.
+// "make the dark areas darker." c is the contrast amount (0..1).
+function contrastMul(L, c) {
+  if (c <= 0) return 1;
+  const pivot = 0.60;
+  const gainDown = 1 + c * 2.0; // below pivot: strong darkening
+  const gainUp   = 1 + c * 0.5; // above pivot: gentle brightening
+  let Lp = pivot + (L - pivot) * (L < pivot ? gainDown : gainUp);
+  Lp = Lp < 0 ? 0 : Lp > 1 ? 1 : Lp;
+  return L > 0.004 ? Lp / L : 0;
+}
+
+// Rasterize the emoji into a small square buffer. blurPx softens it for the
+// glow; tint recolors the silhouette for mono mode.
+function makeEmojiBuffer(emoji, buf, scaleFrac, blurPx, tint) {
+  const o = document.createElement("canvas");
+  o.width = o.height = buf;
+  const c = o.getContext("2d", { willReadFrequently: true });
+  c.textAlign = "center";
+  c.textBaseline = "middle";
+  if (blurPx) c.filter = `blur(${blurPx}px)`;
+  c.font = Math.round(buf * scaleFrac) + "px " + EMOJI_FONT;
+  c.fillText(emoji, buf / 2, buf / 2);
+  c.filter = "none";
+  if (tint) {
+    c.globalCompositeOperation = "source-in"; // keep alpha, replace color
+    c.fillStyle = tint;
+    c.fillRect(0, 0, buf, buf);
+    c.globalCompositeOperation = "source-over";
+  }
+  return { cv: o, px: c.getImageData(0, 0, buf, buf).data };
+}
+
+// Tight bounding box of the non-transparent pixels, so we can recenter the
+// emoji no matter how its glyph happens to sit in the font's box.
+function contentBounds(px, buf) {
+  let minX = buf, minY = buf, maxX = -1, maxY = -1;
+  for (let y = 0; y < buf; y++) {
+    for (let x = 0; x < buf; x++) {
+      if (px[(y * buf + x) * 4 + 3] > 16) {
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < minX) return { minX: 0, minY: 0, maxX: buf - 1, maxY: buf - 1 }; // nothing drawn
+  return { minX, minY, maxX, maxY };
+}
+
+function render() {
+  const S = +$("canvasSize").value;
+  canvas.width = S;
+  canvas.height = S;
+
+  const fontSize = +$("fontSize").value;
+  const density = +$("density").value / 100;
+  const contrast = +$("contrast").value / 100;
+  const aura = +$("aura").value / 100;
+  const seed = +$("seed").value;
+  const emoji = $("emoji").value || "🙂";
+  const useEmojiColors = $("emojiColors").checked;
+
+  const mode = $("textMode").value;
+  const message = $("message").value;
+  const msgChars = Array.from(message);
+  const words = message.split(/\s+/).filter(Boolean);
+  let msgIdx = 0;
+
+  // Palette (used when "Use emoji colors" is off).
+  const base   = hexToRgb($("color").value);
+  const pLight = mix(base, [255,255,255], 0.55);
+  const pBase  = base;
+  const pMid   = scale(base, 0.82);
+  const pDim   = scale(base, 0.62);
+  const pDark  = scale(base, 0.45);
+  const pDeep  = scale(base, 0.30);
+  const pGlow  = mix(base, [255,255,255], 0.10);
+
+  syncLabels();
+
+  const rnd = mulberry32(seed);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, S, S);
+
+  // Two rasterizations: a sharp one for coverage/color, a blurred one for the halo.
+  const BUF = 256;
+  const sharp = makeEmojiBuffer(emoji, BUF, 0.72, 0, null);
+  const glow  = makeEmojiBuffer(emoji, BUF, 0.72, BUF * 0.05, useEmojiColors ? null : rgb(pBase));
+
+  // Recenter on the emoji's actual pixels and scale it to ~80% of the canvas.
+  const b = contentBounds(sharp.px, BUF);
+  const bw = b.maxX - b.minX + 1, bh = b.maxY - b.minY + 1;
+  const sFit = (S * 0.80) / Math.max(bw, bh);   // canvas px per buffer px
+  const dx0 = (S - bw * sFit) / 2;              // top-left of content in canvas
+  const dy0 = (S - bh * sFit) / 2;
+
+  // Map a canvas coord to a buffer pixel, or null if outside the buffer.
+  function samp(px, x, y) {
+    const bx = b.minX + (x - dx0) / sFit;
+    const by = b.minY + (y - dy0) / sFit;
+    if (bx < 0 || by < 0 || bx >= BUF || by >= BUF) return null;
+    const i = ((by | 0) * BUF + (bx | 0)) * 4;
+    return [px[i], px[i + 1], px[i + 2], px[i + 3]];
+  }
+
+  // Soft shape-following halo behind the characters, aligned to the same transform.
+  ctx.save();
+  ctx.globalAlpha = 0.22 + 0.5 * aura;
+  ctx.drawImage(glow.cv, dx0 - b.minX * sFit, dy0 - b.minY * sFit, BUF * sFit, BUF * sFit);
+  ctx.restore();
+
+  ctx.textBaseline = "top";
+  ctx.font = fontSize + "px ui-monospace, Menlo, Consolas, monospace";
+  const stepX = fontSize * 0.82;
+  const stepY = fontSize * 1.28;
+
+  ctx.shadowColor = useEmojiColors ? "rgba(255,240,210,.45)" : rgba(pGlow, 0.85);
+  ctx.shadowBlur = 6 + aura * 12;
+
+  // Pick the next character for a covered cell, honoring the text mode.
+  let pending = [];
+  function nextGlyph() {
+    if (mode === "words" && msgChars.length) {
+      return msgChars[msgIdx++ % msgChars.length];
+    }
+    if (mode === "hidden" && words.length) {
+      if (pending.length === 0 && rnd() < 0.05) pending = Array.from(words[Math.floor(rnd() * words.length)]);
+      if (pending.length) return pending.shift();
+    }
+    return chars[Math.floor(rnd() * chars.length)];
+  }
+
+  for (let y = 0; y < S; y += stepY) {
+    const offset = (Math.round(y / stepY) % 2) * stepX / 2; // brick offset
+    pending = []; // don't let hidden words wrap across rows
+    for (let x = offset; x < S; x += stepX) {
+      const s = samp(sharp.px, x, y);
+
+      if (s && s[3] > 60) {
+        // Inside the emoji silhouette.
+        if (rnd() < density) {
+          const ch = nextGlyph();
+          const roll = rnd();
+          const lum = (0.299*s[0] + 0.587*s[1] + 0.114*s[2]) / 255;
+          const m = contrastMul(lum, contrast);
+          if (useEmojiColors) {
+            let col = [s[0]*m, s[1]*m, s[2]*m];
+            if (roll < 0.2) col = mix(col.map(Math.round), [255,255,255], 0.35);
+            ctx.fillStyle = rgbi(col);
+          } else {
+            const pal = lum > 0.8 ? pLight : lum > 0.55 ? pBase : lum > 0.33 ? pMid : pDim;
+            ctx.fillStyle = rgbi([pal[0]*m, pal[1]*m, pal[2]*m]);
+          }
+          ctx.fillText(ch, x, y);
+        }
+      } else {
+        // Outside: scatter faint glyphs, more likely near the glowing edge.
+        const gs = samp(glow.px, x, y);
+        if (gs && gs[3] > 8 && rnd() < aura * (gs[3] / 255) * 0.5) {
+          const ch = chars[Math.floor(rnd() * chars.length)];
+          if (useEmojiColors) {
+            ctx.fillStyle = rgba([gs[0], gs[1], gs[2]], 0.5);
+          } else {
+            ctx.fillStyle = rnd() < 0.5 ? rgba(pDark, 0.6) : rgba(pDeep, 0.45);
+          }
+          ctx.fillText(ch, x, y);
+        }
+      }
+    }
+  }
+
+  ctx.shadowBlur = 0;
+}
+
+function syncLabels() {
+  $("fontSizeVal").textContent = $("fontSize").value + "px";
+  $("densityVal").textContent = $("density").value + "%";
+  $("contrastVal").textContent = $("contrast").value + "%";
+  $("auraVal").textContent = $("aura").value + "%";
+  $("canvasSizeVal").textContent = $("canvasSize").value + "px";
+  $("seedVal").textContent = $("seed").value;
+}
+
+// --- emoji keyboard ---
+const EMOJI_GROUPS = {
+  "Smileys": "😀 😃 😄 😁 😆 😅 😂 🤣 🙂 🙃 😉 😊 😇 🥰 😍 🤩 😘 😋 😜 🤪 🤗 🤔 🤐 😐 😑 😶 😏 😒 🙄 😬 😌 😔 😪 🤤 😴 😷 🤒 🤕 🤢 🤮 🥵 🥶 🥴 😵 🤯 🤠 🥳 😎 🤓 🧐 😕 🙁 😮 😲 🥺 😨 😰 😥 😢 😭 😱 😖 😞 😓 😩 😫 😤 😡 😠 🤬 😈 👿 💀 💩 🤡 👻 👽 🤖 😺 😹 😻 🙀",
+  "Gestures": "👋 🤚 🖐️ ✋ 🖖 👌 🤌 🤏 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ 👍 👎 ✊ 👊 🤛 🤜 👏 🙌 👐 🤲 🙏 💪 🦾 ✍️ 💅",
+  "Hearts": "❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💟 💌 💋 💯 💥 💫 ⭐ 🌟 ✨ ⚡ 🔥",
+  "Animals": "🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🙈 🙉 🙊 🐔 🐧 🐦 🐤 🦆 🦅 🦉 🦇 🐺 🐗 🐴 🦄 🐝 🐛 🦋 🐌 🐞 🐢 🐍 🐙 🦑 🦀 🐠 🐟 🐬 🐳 🐋 🦈 🐊 🐘 🐫 🦒 🐎 🐑 🐐 🐕 🐈 🐓 🦃 🦚 🐇 🐉 🦕 🦖",
+  "Food": "🍏 🍎 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🫐 🍈 🍒 🍑 🥭 🍍 🥥 🥝 🍅 🍆 🥑 🥦 🥕 🌽 🌶️ 🥔 🍞 🥐 🥨 🧀 🥚 🍳 🥓 🥩 🍗 🍖 🌭 🍔 🍟 🍕 🥪 🌮 🌯 🥗 🍝 🍜 🍲 🍣 🍱 🍤 🍙 🍚 🍥 🍡 🍧 🍨 🍦 🥧 🧁 🍰 🎂 🍭 🍬 🍫 🍿 🍩 🍪 ☕ 🍵 🥤 🍺 🍻 🥂 🍷 🍸 🍹 🍾",
+  "Activities": "⚽ 🏀 🏈 ⚾ 🥎 🎾 🏐 🏉 🥏 🎱 🏓 🏸 🥅 🏒 🏑 🏏 ⛳ 🏹 🎣 🥊 🥋 🛹 ⛸️ 🥌 🎿 🏂 🏋️ 🤸 ⛹️ 🏌️ 🏇 🧘 🏄 🏊 🚣 🧗 🚵 🚴 🏆 🥇 🥈 🥉 🏅 🎖️ 🎫 🎪 🤹 🎭 🎨 🎬 🎤 🎧 🎼 🎹 🥁 🎷 🎺 🎸 🎻 🎲 🎯 🎳 🎮 🎰 🧩",
+  "Travel": "🚗 🚕 🚙 🚌 🏎️ 🚓 🚑 🚒 🚚 🚜 🛴 🚲 🏍️ 🚨 🚂 🚀 🛸 ⛵ 🚤 🚢 ⚓ ✈️ 🛫 🚁 🗺️ 🗽 🗼 🏰 🏯 🎡 🎢 🎠 ⛲ 🏖️ 🏝️ 🏜️ 🌋 ⛰️ 🏔️ 🗻 🏕️ ⛺",
+  "Sky & Nature": "☀️ 🌤️ ⛅ ☁️ 🌧️ ⛈️ 🌨️ ❄️ ☃️ ⛄ 🌪️ 🌫️ 🌈 ☂️ 💧 🌊 🌍 🌎 🌏 🌕 🌖 🌗 🌘 🌑 🌒 🌓 🌔 🌙 ⭐ 🌟 💫 ☄️ 🪐 🌵 🎄 🌲 🌳 🌴 🌱 🌿 ☘️ 🍀 🍃 🍂 🍁 🍄 🌷 🌹 🌺 🌸 🌼 🌻 💐",
+  "Objects": "⌚ 📱 💻 🖥️ 🖨️ 📷 📸 🎥 📺 📻 ⏰ ⏳ 🔋 🔌 💡 🔦 🕯️ 💸 💵 💰 💳 💎 🔧 🔨 ⚙️ 🧲 🔫 💣 🔪 🛡️ 🔮 🔭 🔬 💊 💉 🚽 🚿 🛁 🔑 🚪 🛏️ 🎁 🎈 🎉 🎊 🎀 ✉️ 📦 📝 ✏️ 📚 📖 📰 📅 📌 📎 ✂️ 🔒 🔓",
+  "Symbols": "✅ ❌ ➕ ➖ ➗ ✖️ ♾️ ❓ ❗ ⚠️ 🚫 ✔️ 🔴 🟠 🟡 🟢 🔵 🟣 🟤 ⚫ ⚪ 🟥 🟧 🟨 🟩 🟦 🟪 ⬛ ⬜ 🔶 🔷 🔸 🔹 🔺 🔻 💠 ♻️ ⚜️ 🔱 ⭕ ™️ ©️ ®️"
+};
+function buildEmojiPicker() {
+  const panel = $("emojiPanel");
+  for (const [cat, list] of Object.entries(EMOJI_GROUPS)) {
+    const h = document.createElement("div");
+    h.className = "cat";
+    h.textContent = cat;
+    panel.appendChild(h);
+    for (const e of list.split(/\s+/)) {
+      if (!e) continue;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = e;
+      btn.addEventListener("click", () => {
+        $("emoji").value = e;
+        panel.classList.add("hidden");
+        render();
+      });
+      panel.appendChild(btn);
+    }
+  }
+}
+$("emojiToggle").addEventListener("click", e => {
+  e.stopPropagation();
+  $("emojiPanel").classList.toggle("hidden");
+});
+document.addEventListener("click", e => {
+  if (!e.target.closest(".picker")) $("emojiPanel").classList.add("hidden");
+});
+
+// Rendering a multi-thousand-pixel canvas with a shadowed glyph per grid cell
+// is heavy, so debounce it: labels update instantly, the redraw coalesces.
+let renderTimer = null;
+function scheduleRender() {
+  clearTimeout(renderTimer);
+  renderTimer = setTimeout(render, 140);
+}
+
+["fontSize","density","contrast","aura","canvasSize","seed","color","emoji","message"].forEach(id =>
+  $(id).addEventListener("input", () => { syncLabels(); scheduleRender(); })
+);
+$("emojiColors").addEventListener("change", () => {
+  $("color").disabled = $("emojiColors").checked;
+  render();
+});
+$("textMode").addEventListener("change", () => {
+  $("message").disabled = $("textMode").value === "random";
+  render();
+});
+$("renderBtn").addEventListener("click", render);
+$("randomBtn").addEventListener("click", () => {
+  $("seed").value = 1 + Math.floor(Math.random() * 9999);
+  syncLabels();
+  render();
+});
+
+// Approximate decoded byte size of a data URL (base64 is ~4/3 of the raw bytes).
+function dataURLBytes(url) {
+  const i = url.indexOf(",");
+  return Math.floor((url.length - i - 1) * 0.75);
+}
+
+// PNG of this noisy text is several MB; JPEG compresses it far better. Step
+// quality down — and finally scale the canvas down — until it fits the limit.
+function exportUnderLimit(maxBytes) {
+  const quals = [0.92, 0.85, 0.78, 0.7, 0.6, 0.5, 0.4];
+  let scaleF = 1, last = null;
+  for (let pass = 0; pass < 6; pass++) {
+    let src = canvas;
+    if (scaleF < 0.999) {
+      const off = document.createElement("canvas");
+      off.width = Math.max(1, Math.round(canvas.width * scaleF));
+      off.height = Math.max(1, Math.round(canvas.height * scaleF));
+      const octx = off.getContext("2d");
+      octx.fillStyle = "#000";
+      octx.fillRect(0, 0, off.width, off.height);
+      octx.drawImage(canvas, 0, 0, off.width, off.height);
+      src = off;
+    }
+    for (const q of quals) {
+      const url = src.toDataURL("image/jpeg", q);
+      last = url;
+      if (dataURLBytes(url) <= maxBytes) return url;
+    }
+    scaleF *= 0.85;
+  }
+  return last; // smallest we could produce
+}
+
+$("downloadBtn").addEventListener("click", () => {
+  const url = exportUnderLimit(1024 * 1024 - 16 * 1024); // ~1 MB with headroom
+  const a = document.createElement("a");
+  a.download = "emoji-ascii-seed" + $("seed").value + ".jpg";
+  a.href = url;
+  a.click();
+});
+
+buildEmojiPicker();
+$("color").disabled = $("emojiColors").checked;
+$("message").disabled = $("textMode").value === "random";
+syncLabels();
+render();
+</script>
+</body>
+</html>
