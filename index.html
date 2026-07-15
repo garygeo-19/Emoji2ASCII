@@ -13,6 +13,7 @@
   input[type="text"], select { width:100%; box-sizing:border-box; padding:8px; font-size:14px; background:#262626; color:#fff; border:1px solid #555; border-radius:8px; }
   #emoji { font-size:22px; }
   input[type="color"] { width:100%; height:34px; padding:0; border:1px solid #555; border-radius:8px; background:#262626; cursor:pointer; }
+  input[type="file"] { width:100%; box-sizing:border-box; padding:6px; font-size:12px; color:#aaa; background:#262626; border:1px solid #555; border-radius:8px; }
   input[type="checkbox"] { width:16px; height:16px; }
   label:has(input:disabled), label:has(select:disabled) { opacity:.4; }
   button { margin-top:10px; width:100%; padding:10px; border:1px solid #555; background:#262626; color:#fff; border-radius:8px; cursor:pointer; }
@@ -38,7 +39,7 @@
 <body>
 <aside>
   <h2>Emoji ASCII Renderer</h2>
-  <p class="small">Type or pick any emoji and render it as a glowing field of ASCII characters.</p>
+  <p class="small">Type or pick any emoji — or upload a photo — and render it as a glowing field of ASCII characters.</p>
 
   <label>Emoji
     <div class="picker">
@@ -50,12 +51,30 @@
     </div>
   </label>
 
+  <label>Photo (optional — replaces the emoji)
+    <div class="pickrow">
+      <input id="photo" type="file" accept="image/*">
+      <button id="photoClear" type="button" class="iconbtn" title="Remove photo, back to emoji" hidden>✕</button>
+    </div>
+  </label>
+
   <label>Letter size <span id="fontSizeVal"></span><input id="fontSize" type="range" min="8" max="30" value="18"></label>
   <label>Density <span id="densityVal"></span><input id="density" type="range" min="35" max="100" value="85"></label>
   <label>Contrast <span id="contrastVal"></span><input id="contrast" type="range" min="0" max="100" value="35"></label>
   <label>Aura strength <span id="auraVal"></span><input id="aura" type="range" min="0" max="100" value="62"></label>
   <label>Canvas size <span id="canvasSizeVal"></span><input id="canvasSize" type="range" min="1000" max="3000" value="2200" step="100"></label>
   <label>Seed <span id="seedVal"></span><input id="seed" type="range" min="1" max="9999" value="2026"></label>
+
+  <label>Characters
+    <select id="charset">
+      <option value="matrix">Matrix mix (letters + symbols)</option>
+      <option value="binary">Binary (0 / 1)</option>
+      <option value="katakana">Katakana</option>
+      <option value="blocks">Block shades</option>
+      <option value="custom">Custom…</option>
+    </select>
+  </label>
+  <label>Custom characters <input id="customChars" type="text" placeholder="e.g. @#%*+=-:." autocomplete="off"></label>
 
   <label>Text mode
     <select id="textMode">
@@ -68,10 +87,16 @@
 
   <label class="check"><input id="emojiColors" type="checkbox" checked> Use emoji colors</label>
   <label>Color <input id="color" type="color" value="#ffd200"></label>
+  <label class="check"><input id="transparentBg" type="checkbox"> Transparent background (PNG)</label>
 
   <button id="renderBtn">Render</button>
   <button id="randomBtn">Randomize seed</button>
+  <label class="check"><input id="animate" type="checkbox"> Animate (cycle seeds)</label>
   <button id="downloadBtn">Download JPG (under 1 MB)</button>
+  <button id="downloadPngBtn">Download PNG</button>
+  <button id="copyTextBtn">Copy as text</button>
+  <button id="copyLinkBtn">Copy share link</button>
+  <button id="webmBtn">Export animation (WebM)</button>
 </aside>
 
 <main><canvas id="c" width="2200" height="2200"></canvas></main>
@@ -90,8 +115,38 @@ function mulberry32(a) {
   }
 }
 
-const chars = "01ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%&*+-=<>?/{}[]";
+const CHARSETS = {
+  matrix: "01ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%&*+-=<>?/{}[]",
+  binary: "01",
+  katakana: "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789Z:･=*+-<>",
+  blocks: "█▓▒░▄▀▌▐■□▪",
+};
+// Array.from so custom input can contain emoji/astral characters safely.
+function activeChars() {
+  if ($("charset").value === "custom") {
+    const custom = Array.from($("customChars").value);
+    if (custom.length) return custom;
+  }
+  return Array.from(CHARSETS[$("charset").value] || CHARSETS.matrix);
+}
+
 const EMOJI_FONT = '"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif';
+
+// Uploaded photo (replaces the emoji as the rendered source while set).
+let uploadedImage = null;
+$("photo").addEventListener("change", () => {
+  const file = $("photo").files[0];
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => { uploadedImage = img; $("photoClear").hidden = false; render(); };
+  img.src = URL.createObjectURL(file);
+});
+$("photoClear").addEventListener("click", () => {
+  uploadedImage = null;
+  $("photo").value = "";
+  $("photoClear").hidden = true;
+  render();
+});
 
 // --- color helpers: derive a tint/shade palette from one picked color ---
 function hexToRgb(hex) {
@@ -117,17 +172,28 @@ function contrastMul(L, c) {
   return L > 0.004 ? Lp / L : 0;
 }
 
-// Rasterize the emoji into a small square buffer. blurPx softens it for the
-// glow; tint recolors the silhouette for mono mode.
-function makeEmojiBuffer(emoji, buf, scaleFrac, blurPx, tint) {
+// Rasterize the source (emoji text, or the uploaded photo) into a small square
+// buffer. blurPx softens it for the glow; tint recolors the silhouette for
+// mono mode.
+function makeSourceBuffer(emoji, buf, scaleFrac, blurPx, tint) {
   const o = document.createElement("canvas");
   o.width = o.height = buf;
   const c = o.getContext("2d", { willReadFrequently: true });
-  c.textAlign = "center";
-  c.textBaseline = "middle";
   if (blurPx) c.filter = `blur(${blurPx}px)`;
-  c.font = Math.round(buf * scaleFrac) + "px " + EMOJI_FONT;
-  c.fillText(emoji, buf / 2, buf / 2);
+  if (uploadedImage) {
+    const f = (buf * 0.92) / Math.max(uploadedImage.width, uploadedImage.height);
+    const w = uploadedImage.width * f, h = uploadedImage.height * f;
+    c.drawImage(uploadedImage, (buf - w) / 2, (buf - h) / 2, w, h);
+  } else {
+    c.textAlign = "center";
+    c.textBaseline = "middle";
+    const fs = Math.round(buf * scaleFrac);
+    c.font = fs + "px " + EMOJI_FONT;
+    // Multi-emoji strings: shrink to fit instead of clipping at the edges.
+    const tw = c.measureText(emoji).width;
+    if (tw > buf * 0.92) c.font = Math.max(8, Math.floor(fs * buf * 0.92 / tw)) + "px " + EMOJI_FONT;
+    c.fillText(emoji, buf / 2, buf / 2);
+  }
   c.filter = "none";
   if (tint) {
     c.globalCompositeOperation = "source-in"; // keep alpha, replace color
@@ -154,7 +220,10 @@ function contentBounds(px, buf) {
   return { minX, minY, maxX, maxY };
 }
 
-function render() {
+// seedOverride lets the animation exporter drive frames without touching the
+// slider; it's also the event object when used directly as a listener, so
+// only honor it when it's an actual number.
+function render(seedOverride) {
   const S = +$("canvasSize").value;
   canvas.width = S;
   canvas.height = S;
@@ -163,9 +232,10 @@ function render() {
   const density = +$("density").value / 100;
   const contrast = +$("contrast").value / 100;
   const aura = +$("aura").value / 100;
-  const seed = +$("seed").value;
+  const seed = Number.isFinite(seedOverride) ? seedOverride : +$("seed").value;
   const emoji = $("emoji").value || "🙂";
   const useEmojiColors = $("emojiColors").checked;
+  const glyphs = activeChars();
 
   const mode = $("textMode").value;
   const message = $("message").value;
@@ -186,13 +256,17 @@ function render() {
   syncLabels();
 
   const rnd = mulberry32(seed);
-  ctx.fillStyle = "#000";
-  ctx.fillRect(0, 0, S, S);
+  if ($("transparentBg").checked) {
+    ctx.clearRect(0, 0, S, S);
+  } else {
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, S, S);
+  }
 
   // Two rasterizations: a sharp one for coverage/color, a blurred one for the halo.
   const BUF = 256;
-  const sharp = makeEmojiBuffer(emoji, BUF, 0.72, 0, null);
-  const glow  = makeEmojiBuffer(emoji, BUF, 0.72, BUF * 0.05, useEmojiColors ? null : rgb(pBase));
+  const sharp = makeSourceBuffer(emoji, BUF, 0.72, 0, null);
+  const glow  = makeSourceBuffer(emoji, BUF, 0.72, BUF * 0.05, useEmojiColors ? null : rgb(pBase));
 
   // Recenter on the emoji's actual pixels and scale it to ~80% of the canvas.
   const b = contentBounds(sharp.px, BUF);
@@ -234,14 +308,17 @@ function render() {
       if (pending.length === 0 && rnd() < 0.05) pending = Array.from(words[Math.floor(rnd() * words.length)]);
       if (pending.length) return pending.shift();
     }
-    return chars[Math.floor(rnd() * chars.length)];
+    return glyphs[Math.floor(rnd() * glyphs.length)];
   }
 
+  const textRows = []; // plain-text mirror of the canvas, for "Copy as text"
   for (let y = 0; y < S; y += stepY) {
     const offset = (Math.round(y / stepY) % 2) * stepX / 2; // brick offset
     pending = []; // don't let hidden words wrap across rows
+    const row = [];
     for (let x = offset; x < S; x += stepX) {
       const s = samp(sharp.px, x, y);
+      let cell = " ";
 
       if (s && s[3] > 60) {
         // Inside the emoji silhouette.
@@ -259,24 +336,68 @@ function render() {
             ctx.fillStyle = rgbi([pal[0]*m, pal[1]*m, pal[2]*m]);
           }
           ctx.fillText(ch, x, y);
+          cell = ch;
         }
       } else {
         // Outside: scatter faint glyphs, more likely near the glowing edge.
         const gs = samp(glow.px, x, y);
         if (gs && gs[3] > 8 && rnd() < aura * (gs[3] / 255) * 0.5) {
-          const ch = chars[Math.floor(rnd() * chars.length)];
+          const ch = glyphs[Math.floor(rnd() * glyphs.length)];
           if (useEmojiColors) {
             ctx.fillStyle = rgba([gs[0], gs[1], gs[2]], 0.5);
           } else {
             ctx.fillStyle = rnd() < 0.5 ? rgba(pDark, 0.6) : rgba(pDeep, 0.45);
           }
           ctx.fillText(ch, x, y);
+          cell = ch;
         }
       }
+      row.push(cell);
     }
+    textRows.push(row.join("").replace(/\s+$/, ""));
   }
+  lastText = textRows.join("\n");
 
   ctx.shadowBlur = 0;
+  updateHash();
+}
+
+let lastText = ""; // plain-text version of the last render
+
+// --- shareable URLs: settings live in the hash, so a link reproduces the image ---
+const HASH_IDS = ["emoji","fontSize","density","contrast","aura","canvasSize","seed","textMode","message","color","charset","customChars"];
+const HASH_CHECKS = ["emojiColors","transparentBg"];
+function updateHash() {
+  if (uploadedImage) return; // an uploaded photo can't be encoded in a link
+  const p = new URLSearchParams();
+  HASH_IDS.forEach(id => p.set(id, $(id).value));
+  HASH_CHECKS.forEach(id => p.set(id, $(id).checked ? 1 : 0));
+  history.replaceState(null, "", "#" + p.toString());
+}
+function applyHash() {
+  if (location.hash.length < 2) return;
+  const p = new URLSearchParams(location.hash.slice(1));
+  HASH_IDS.forEach(id => { if (p.has(id)) $(id).value = p.get(id); });
+  HASH_CHECKS.forEach(id => { if (p.has(id)) $(id).checked = p.get(id) === "1"; });
+}
+
+// Pasting a share link into an already-open tab only changes the hash — no
+// reload — so apply it live. (updateHash uses replaceState, which doesn't
+// fire this event, so our own renders don't loop.)
+window.addEventListener("hashchange", () => {
+  applyHash();
+  $("color").disabled = $("emojiColors").checked;
+  $("message").disabled = $("textMode").value === "random";
+  $("customChars").disabled = $("charset").value !== "custom";
+  syncLabels();
+  render();
+});
+
+// Briefly swap a button's label to confirm an action.
+function flash(btn, msg) {
+  const old = btn.textContent;
+  btn.textContent = msg;
+  setTimeout(() => { btn.textContent = old; }, 1200);
 }
 
 function syncLabels() {
@@ -338,7 +459,7 @@ function scheduleRender() {
   renderTimer = setTimeout(render, 140);
 }
 
-["fontSize","density","contrast","aura","canvasSize","seed","color","emoji","message"].forEach(id =>
+["fontSize","density","contrast","aura","canvasSize","seed","color","emoji","message","customChars"].forEach(id =>
   $(id).addEventListener("input", () => { syncLabels(); scheduleRender(); })
 );
 $("emojiColors").addEventListener("change", () => {
@@ -349,11 +470,30 @@ $("textMode").addEventListener("change", () => {
   $("message").disabled = $("textMode").value === "random";
   render();
 });
+$("charset").addEventListener("change", () => {
+  $("customChars").disabled = $("charset").value !== "custom";
+  render();
+});
+$("transparentBg").addEventListener("change", render);
 $("renderBtn").addEventListener("click", render);
 $("randomBtn").addEventListener("click", () => {
   $("seed").value = 1 + Math.floor(Math.random() * 9999);
   syncLabels();
   render();
+});
+
+// Live preview: keep advancing the seed so the noise shimmers.
+let animTimer = null;
+function animStep() {
+  if (!$("animate").checked) return;
+  $("seed").value = 1 + (+$("seed").value % 9999);
+  syncLabels();
+  render();
+  animTimer = setTimeout(animStep, 130);
+}
+$("animate").addEventListener("change", () => {
+  clearTimeout(animTimer);
+  if ($("animate").checked) animStep();
 });
 
 // Approximate decoded byte size of a data URL (base64 is ~4/3 of the raw bytes).
@@ -397,9 +537,74 @@ $("downloadBtn").addEventListener("click", () => {
   a.click();
 });
 
+// PNG keeps alpha, so this is the export to pair with "Transparent background".
+$("downloadPngBtn").addEventListener("click", () => {
+  const a = document.createElement("a");
+  a.download = "emoji-ascii-seed" + $("seed").value + ".png";
+  a.href = canvas.toDataURL("image/png");
+  a.click();
+});
+
+$("copyTextBtn").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(lastText);
+    flash($("copyTextBtn"), "Copied!");
+  } catch {
+    // Clipboard can be unavailable (e.g. file:// in some browsers) — save instead.
+    const a = document.createElement("a");
+    a.download = "emoji-ascii-seed" + $("seed").value + ".txt";
+    a.href = URL.createObjectURL(new Blob([lastText], { type: "text/plain" }));
+    a.click();
+  }
+});
+
+$("copyLinkBtn").addEventListener("click", async () => {
+  if (uploadedImage) { flash($("copyLinkBtn"), "Photos can't be linked"); return; }
+  updateHash();
+  try {
+    await navigator.clipboard.writeText(location.href);
+    flash($("copyLinkBtn"), "Link copied!");
+  } catch {
+    prompt("Copy this link:", location.href);
+  }
+});
+
+// Record N seed-advancing frames off the live canvas into a WebM (or MP4 where
+// that's what MediaRecorder supports, e.g. Safari).
+$("webmBtn").addEventListener("click", async () => {
+  const btn = $("webmBtn");
+  const mime = ["video/webm;codecs=vp9", "video/webm", "video/mp4"]
+    .find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t));
+  if (!mime) { flash(btn, "Not supported in this browser"); return; }
+  btn.disabled = true;
+  const fps = 10, frames = 40;
+  const rec = new MediaRecorder(canvas.captureStream(fps), { mimeType: mime, videoBitsPerSecond: 10_000_000 });
+  const chunks = [];
+  rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  const stopped = new Promise(res => { rec.onstop = res; });
+  rec.start();
+  const seed0 = +$("seed").value;
+  for (let i = 0; i < frames; i++) {
+    render(((seed0 + i - 1) % 9999) + 1);
+    btn.textContent = `Recording ${i + 1}/${frames}…`;
+    await new Promise(r => setTimeout(r, 1000 / fps));
+  }
+  rec.stop();
+  await stopped;
+  render(seed0);
+  const a = document.createElement("a");
+  a.download = "emoji-ascii-anim." + (mime.includes("mp4") ? "mp4" : "webm");
+  a.href = URL.createObjectURL(new Blob(chunks, { type: mime }));
+  a.click();
+  btn.disabled = false;
+  btn.textContent = "Export animation (WebM)";
+});
+
 buildEmojiPicker();
+applyHash();
 $("color").disabled = $("emojiColors").checked;
 $("message").disabled = $("textMode").value === "random";
+$("customChars").disabled = $("charset").value !== "custom";
 syncLabels();
 render();
 </script>
