@@ -10,8 +10,8 @@
   label { display:grid; gap:5px; margin:12px 0; font-size:13px; }
   label.check { display:flex; align-items:center; gap:8px; }
   input[type="range"] { width:100%; }
-  input[type="text"], select { width:100%; box-sizing:border-box; padding:8px; font-size:14px; background:#262626; color:#fff; border:1px solid #555; border-radius:8px; }
-  #emoji { font-size:22px; }
+  input[type="text"], textarea, select { width:100%; box-sizing:border-box; padding:8px; font-size:14px; background:#262626; color:#fff; border:1px solid #555; border-radius:8px; font-family:inherit; }
+  #emoji { flex:1; min-width:0; font-size:22px; text-align:center; line-height:1.3; min-height:52px; resize:vertical; }
   input[type="color"] { width:100%; height:34px; padding:0; border:1px solid #555; border-radius:8px; background:#262626; cursor:pointer; }
   input[type="file"] { width:100%; box-sizing:border-box; padding:6px; font-size:12px; color:#aaa; background:#262626; border:1px solid #555; border-radius:8px; }
   input[type="checkbox"] { width:16px; height:16px; }
@@ -21,7 +21,7 @@
 
   /* emoji keyboard */
   .picker { position:relative; }
-  .pickrow { display:flex; gap:6px; }
+  .pickrow { display:flex; gap:6px; align-items:flex-start; }
   .iconbtn { margin-top:0; width:auto; flex:0 0 auto; padding:6px 12px; font-size:18px; }
   .panel { position:absolute; z-index:20; top:100%; left:0; right:0; margin-top:4px; max-height:280px; overflow-y:auto;
            background:#202020; border:1px solid #555; border-radius:8px; padding:6px;
@@ -39,17 +39,19 @@
 <body>
 <aside>
   <h2>Emoji ASCII Renderer</h2>
-  <p class="small">Type or pick any emoji — or upload a photo — and render it as a glowing field of ASCII characters.</p>
+  <p class="small">Type any text, add emoji with the 😀 button — or upload a photo — and render it as a glowing field of ASCII characters.</p>
 
-  <label>Emoji
+  <label>Text
     <div class="picker">
       <div class="pickrow">
-        <input id="emoji" type="text" value="🙂" maxlength="20" autocomplete="off" spellcheck="false">
-        <button id="emojiToggle" type="button" class="iconbtn" title="Pick an emoji">⌨️</button>
+        <textarea id="emoji" rows="2" maxlength="500" autocomplete="off" spellcheck="false"
+                  placeholder="Type text or add emoji 😀">🙂</textarea>
+        <button id="emojiToggle" type="button" class="iconbtn" title="Add an emoji">😀</button>
       </div>
       <div id="emojiPanel" class="panel hidden"></div>
     </div>
   </label>
+  <label class="check"><input id="wordWrap" type="checkbox"> Word wrap (auto-wrap long lines)</label>
 
   <label>Photo (optional — replaces the emoji)
     <div class="pickrow">
@@ -85,7 +87,7 @@
   </label>
   <label>Words / message <input id="message" type="text" placeholder="e.g. you are loved" autocomplete="off"></label>
 
-  <label class="check"><input id="emojiColors" type="checkbox" checked> Use emoji colors</label>
+  <label class="check"><input id="emojiColors" type="checkbox" checked> Use original colors</label>
   <label>Color <input id="color" type="color" value="#ffd200"></label>
   <label class="check"><input id="transparentBg" type="checkbox"> Transparent background (PNG)</label>
 
@@ -97,6 +99,7 @@
   <button id="copyTextBtn">Copy as text</button>
   <button id="copyLinkBtn">Copy share link</button>
   <button id="webmBtn">Export animation (WebM)</button>
+  <button id="gifBtn">Export animation (GIF)</button>
 </aside>
 
 <main><canvas id="c" width="2200" height="2200"></canvas></main>
@@ -138,13 +141,19 @@ $("photo").addEventListener("change", () => {
   const file = $("photo").files[0];
   if (!file) return;
   const img = new Image();
-  img.onload = () => { uploadedImage = img; $("photoClear").hidden = false; render(); };
+  img.onload = () => {
+    uploadedImage = img;
+    $("photoClear").hidden = false;
+    $("wordWrap").disabled = true; // a photo has no text to wrap
+    render();
+  };
   img.src = URL.createObjectURL(file);
 });
 $("photoClear").addEventListener("click", () => {
   uploadedImage = null;
   $("photo").value = "";
   $("photoClear").hidden = true;
+  $("wordWrap").disabled = false;
   render();
 });
 
@@ -172,10 +181,57 @@ function contrastMul(L, c) {
   return L > 0.004 ? Lp / L : 0;
 }
 
-// Rasterize the source (emoji text, or the uploaded photo) into a small square
+// Greedily break `text` into lines that fit `maxW` at the current font, breaking
+// at spaces when possible (word wrap) and hard-breaking long runs (e.g. a wall
+// of emoji with no spaces) so nothing overflows.
+function wrapLines(c, text, maxW) {
+  const lines = [];
+  let line = "";
+  for (const g of Array.from(text)) {
+    const test = line + g;
+    if (line !== "" && c.measureText(test).width > maxW) {
+      const sp = line.lastIndexOf(" ");
+      if (sp >= 0) { lines.push(line.slice(0, sp)); line = line.slice(sp + 1) + g; }
+      else { lines.push(line); line = g; }
+    } else {
+      line = test;
+    }
+  }
+  if (line !== "") lines.push(line);
+  return lines;
+}
+
+// Break `text` into display lines and pick the largest font size whose block
+// fits the buffer. Explicit newlines always break; `wrap` additionally wraps any
+// line too wide to fit. Returns the chosen font size and the laid-out lines.
+function layoutText(c, text, buf, wrap) {
+  const maxW = buf * 0.92, maxH = buf * 0.92, lineH = 1.15;
+  const paras = text.split("\n");
+  const linesAt = fontPx => {
+    c.font = fontPx + "px " + EMOJI_FONT;
+    let lines = [];
+    for (const p of paras) lines = lines.concat(wrap ? wrapLines(c, p, maxW) : [p]);
+    return lines.length ? lines : [""];
+  };
+  const fits = fontPx => {
+    const lines = linesAt(fontPx);
+    if (lines.length * fontPx * lineH > maxH) return false;
+    c.font = fontPx + "px " + EMOJI_FONT;
+    return lines.every(l => c.measureText(l).width <= maxW);
+  };
+  let lo = 6, hi = buf, best = 6;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (fits(mid)) { best = mid; lo = mid; } else hi = mid;
+  }
+  return { fontPx: best, lines: linesAt(best), lineH };
+}
+
+// Rasterize the source (emoji/text, or the uploaded photo) into a small square
 // buffer. blurPx softens it for the glow; tint recolors the silhouette for
-// mono mode.
-function makeSourceBuffer(emoji, buf, scaleFrac, blurPx, tint) {
+// mono mode. Text is laid out across multiple lines (explicit newlines, plus
+// optional word wrap) and sized to fill the buffer.
+function makeSourceBuffer(emoji, buf, scaleFrac, blurPx, tint, wrap) {
   const o = document.createElement("canvas");
   o.width = o.height = buf;
   const c = o.getContext("2d", { willReadFrequently: true });
@@ -187,12 +243,11 @@ function makeSourceBuffer(emoji, buf, scaleFrac, blurPx, tint) {
   } else {
     c.textAlign = "center";
     c.textBaseline = "middle";
-    const fs = Math.round(buf * scaleFrac);
-    c.font = fs + "px " + EMOJI_FONT;
-    // Multi-emoji strings: shrink to fit instead of clipping at the edges.
-    const tw = c.measureText(emoji).width;
-    if (tw > buf * 0.92) c.font = Math.max(8, Math.floor(fs * buf * 0.92 / tw)) + "px " + EMOJI_FONT;
-    c.fillText(emoji, buf / 2, buf / 2);
+    const { fontPx, lines, lineH } = layoutText(c, emoji, buf, wrap);
+    c.font = fontPx + "px " + EMOJI_FONT;
+    const step = fontPx * lineH;
+    let y = buf / 2 - (lines.length - 1) * step / 2;
+    for (const l of lines) { c.fillText(l, buf / 2, y); y += step; }
   }
   c.filter = "none";
   if (tint) {
@@ -237,13 +292,14 @@ function render(seedOverride) {
   const useEmojiColors = $("emojiColors").checked;
   const glyphs = activeChars();
 
+  const wordWrap = $("wordWrap").checked; // wraps the source text/emoji up top
   const mode = $("textMode").value;
   const message = $("message").value;
   const msgChars = Array.from(message);
   const words = message.split(/\s+/).filter(Boolean);
   let msgIdx = 0;
 
-  // Palette (used when "Use emoji colors" is off).
+  // Palette (used when "Use original colors" is off).
   const base   = hexToRgb($("color").value);
   const pLight = mix(base, [255,255,255], 0.55);
   const pBase  = base;
@@ -265,8 +321,8 @@ function render(seedOverride) {
 
   // Two rasterizations: a sharp one for coverage/color, a blurred one for the halo.
   const BUF = 256;
-  const sharp = makeSourceBuffer(emoji, BUF, 0.72, 0, null);
-  const glow  = makeSourceBuffer(emoji, BUF, 0.72, BUF * 0.05, useEmojiColors ? null : rgb(pBase));
+  const sharp = makeSourceBuffer(emoji, BUF, 0.72, 0, null, wordWrap);
+  const glow  = makeSourceBuffer(emoji, BUF, 0.72, BUF * 0.05, useEmojiColors ? null : rgb(pBase), wordWrap);
 
   // Recenter on the emoji's actual pixels and scale it to ~80% of the canvas.
   const b = contentBounds(sharp.px, BUF);
@@ -366,7 +422,7 @@ let lastText = ""; // plain-text version of the last render
 
 // --- shareable URLs: settings live in the hash, so a link reproduces the image ---
 const HASH_IDS = ["emoji","fontSize","density","contrast","aura","canvasSize","seed","textMode","message","color","charset","customChars"];
-const HASH_CHECKS = ["emojiColors","transparentBg"];
+const HASH_CHECKS = ["emojiColors","transparentBg","wordWrap"];
 function updateHash() {
   if (uploadedImage) return; // an uploaded photo can't be encoded in a link
   const p = new URLSearchParams();
@@ -388,6 +444,7 @@ window.addEventListener("hashchange", () => {
   applyHash();
   $("color").disabled = $("emojiColors").checked;
   $("message").disabled = $("textMode").value === "random";
+  $("wordWrap").disabled = !!uploadedImage;
   $("customChars").disabled = $("charset").value !== "custom";
   syncLabels();
   render();
@@ -422,6 +479,16 @@ const EMOJI_GROUPS = {
   "Objects": "⌚ 📱 💻 🖥️ 🖨️ 📷 📸 🎥 📺 📻 ⏰ ⏳ 🔋 🔌 💡 🔦 🕯️ 💸 💵 💰 💳 💎 🔧 🔨 ⚙️ 🧲 🔫 💣 🔪 🛡️ 🔮 🔭 🔬 💊 💉 🚽 🚿 🛁 🔑 🚪 🛏️ 🎁 🎈 🎉 🎊 🎀 ✉️ 📦 📝 ✏️ 📚 📖 📰 📅 📌 📎 ✂️ 🔒 🔓",
   "Symbols": "✅ ❌ ➕ ➖ ➗ ✖️ ♾️ ❓ ❗ ⚠️ 🚫 ✔️ 🔴 🟠 🟡 🟢 🔵 🟣 🟤 ⚫ ⚪ 🟥 🟧 🟨 🟩 🟦 🟪 ⬛ ⬜ 🔶 🔷 🔸 🔹 🔺 🔻 💠 ♻️ ⚜️ 🔱 ⭕ ™️ ©️ ®️"
 };
+// Insert `text` at the textarea's caret (or append), then restore focus/caret so
+// the emoji keyboard behaves like typing.
+function insertAtCursor(el, text) {
+  const start = el.selectionStart ?? el.value.length;
+  const end = el.selectionEnd ?? el.value.length;
+  el.value = el.value.slice(0, start) + text + el.value.slice(end);
+  const pos = start + text.length;
+  el.focus();
+  el.setSelectionRange(pos, pos);
+}
 function buildEmojiPicker() {
   const panel = $("emojiPanel");
   for (const [cat, list] of Object.entries(EMOJI_GROUPS)) {
@@ -435,8 +502,7 @@ function buildEmojiPicker() {
       btn.type = "button";
       btn.textContent = e;
       btn.addEventListener("click", () => {
-        $("emoji").value = e;
-        panel.classList.add("hidden");
+        insertAtCursor($("emoji"), e); // add to the text at the caret; keep the keyboard open
         render();
       });
       panel.appendChild(btn);
@@ -470,6 +536,7 @@ $("textMode").addEventListener("change", () => {
   $("message").disabled = $("textMode").value === "random";
   render();
 });
+$("wordWrap").addEventListener("change", render);
 $("charset").addEventListener("change", () => {
   $("customChars").disabled = $("charset").value !== "custom";
   render();
@@ -600,10 +667,198 @@ $("webmBtn").addEventListener("click", async () => {
   btn.textContent = "Export animation (WebM)";
 });
 
+// --- Self-contained GIF89a encoder (no libraries, keeps this a single file) ---
+
+// Median-cut quantization: split the color space into `maxColors` boxes and
+// average each. `samples` is a flat RGBA array (alpha ignored).
+function quantizePixels(samples, maxColors) {
+  const all = [];
+  for (let i = 0; i < samples.length; i += 4) all.push([samples[i], samples[i+1], samples[i+2]]);
+  if (!all.length) all.push([0,0,0]);
+  const boxes = [all];
+  while (boxes.length < maxColors) {
+    let bi = -1, bestRange = 0, bestCh = 0;
+    for (let i = 0; i < boxes.length; i++) {
+      const box = boxes[i];
+      if (box.length < 2) continue;
+      const mn = [255,255,255], mx = [0,0,0];
+      for (const p of box) for (let c = 0; c < 3; c++) {
+        if (p[c] < mn[c]) mn[c] = p[c];
+        if (p[c] > mx[c]) mx[c] = p[c];
+      }
+      for (let c = 0; c < 3; c++) {
+        const r = mx[c] - mn[c];
+        if (r > bestRange) { bestRange = r; bi = i; bestCh = c; }
+      }
+    }
+    if (bi < 0) break; // every box is a single color
+    const box = boxes[bi];
+    box.sort((a, b) => a[bestCh] - b[bestCh]);
+    const mid = box.length >> 1;
+    boxes.splice(bi, 1, box.slice(0, mid), box.slice(mid));
+  }
+  const palette = boxes.map(box => {
+    const s = [0,0,0];
+    for (const p of box) { s[0]+=p[0]; s[1]+=p[1]; s[2]+=p[2]; }
+    const n = box.length || 1;
+    return [Math.round(s[0]/n), Math.round(s[1]/n), Math.round(s[2]/n)];
+  });
+  while (palette.length < maxColors) palette.push([0,0,0]);
+  return palette.slice(0, maxColors);
+}
+
+// Nearest-palette-color lookup, cached by packed RGB (huge win on flat areas).
+function makeMapper(palette) {
+  const cache = new Map();
+  return (r, g, b) => {
+    const key = (r << 16) | (g << 8) | b;
+    const hit = cache.get(key);
+    if (hit !== undefined) return hit;
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < palette.length; i++) {
+      const p = palette[i];
+      const dr = r - p[0], dg = g - p[1], db = b - p[2];
+      const d = dr*dr + dg*dg + db*db;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    cache.set(key, best);
+    return best;
+  };
+}
+
+// GIF variant of LZW: variable-width codes with clear/EOI. The decoder builds
+// its table one code behind the encoder, so the width must bump when `next`
+// *exceeds* 2^codeSize (not when it equals it) or the streams desync after the
+// first bump. Reset the table once it fills (code 4095).
+function lzwEncode(minCode, indices) {
+  const CLEAR = 1 << minCode, EOI = CLEAR + 1;
+  let codeSize = minCode + 1, next = EOI + 1, dict = new Map();
+  const out = [];
+  let cur = 0, curBits = 0;
+  const emit = code => {
+    cur |= code << curBits; curBits += codeSize;
+    while (curBits >= 8) { out.push(cur & 255); cur >>= 8; curBits -= 8; }
+  };
+  const codeOf = s => dict.has(s) ? dict.get(s) : (+s); // single symbols are literal indices
+  emit(CLEAR);
+  let prefix = "" + indices[0];
+  for (let i = 1; i < indices.length; i++) {
+    const k = indices[i];
+    const comb = prefix + "," + k;
+    if (dict.has(comb)) { prefix = comb; continue; }
+    emit(codeOf(prefix));
+    dict.set(comb, next++);
+    if (next === 4096) {
+      emit(CLEAR); dict = new Map(); codeSize = minCode + 1; next = EOI + 1;
+    } else if (next > (1 << codeSize) && codeSize < 12) {
+      codeSize++;
+    }
+    prefix = "" + k;
+  }
+  emit(codeOf(prefix));
+  emit(EOI);
+  if (curBits > 0) out.push(cur & 255);
+  return out;
+}
+
+// Wrap packed bytes into GIF's length-prefixed 255-byte sub-blocks.
+function subBlocks(bytes) {
+  const out = [];
+  for (let i = 0; i < bytes.length; i += 255) {
+    const chunk = bytes.slice(i, i + 255);
+    out.push(chunk.length);
+    for (const b of chunk) out.push(b);
+  }
+  out.push(0);
+  return out;
+}
+
+// Assemble a looping GIF from frame index-streams sharing one 256-color palette.
+function buildGif(frames, w, h, palette, delayCs) {
+  const bytes = [];
+  const push = (...b) => { for (const x of b) bytes.push(x & 255); };
+  const pushStr = s => { for (let i = 0; i < s.length; i++) bytes.push(s.charCodeAt(i)); };
+  const short = n => push(n & 255, (n >> 8) & 255);
+
+  pushStr("GIF89a");
+  short(w); short(h);
+  push(0xF7, 0x00, 0x00);                 // 256-entry global color table, bg 0, aspect 0
+  for (let i = 0; i < 256; i++) { const c = palette[i] || [0,0,0]; push(c[0], c[1], c[2]); }
+  push(0x21, 0xFF, 0x0B); pushStr("NETSCAPE2.0"); push(0x03, 0x01, 0x00, 0x00, 0x00); // loop forever
+
+  for (const idx of frames) {
+    push(0x21, 0xF9, 0x04, 0x00); short(delayCs); push(0x00, 0x00); // graphic control (delay)
+    push(0x2C); short(0); short(0); short(w); short(h); push(0x00); // image descriptor
+    push(0x08);                                                     // LZW min code size
+    for (const b of subBlocks(lzwEncode(0x08, idx))) bytes.push(b);
+  }
+  push(0x3B); // trailer
+  return new Uint8Array(bytes);
+}
+
+// Render seed-advancing frames, downscale, quantize to a shared palette, encode.
+$("gifBtn").addEventListener("click", async () => {
+  const btn = $("gifBtn");
+  btn.disabled = true;
+  const fps = 12, frames = 20, delayCs = Math.round(100 / fps);
+  const cap = 480;                                   // downscale so LZW/quantize stay quick
+  const scaleF = Math.min(1, cap / canvas.width);
+  const w = Math.max(1, Math.round(canvas.width * scaleF));
+  const h = Math.max(1, Math.round(canvas.height * scaleF));
+  const off = document.createElement("canvas");
+  off.width = w; off.height = h;
+  const octx = off.getContext("2d", { willReadFrequently: true });
+  const seed0 = +$("seed").value;
+  const framePixels = [];
+  try {
+    for (let i = 0; i < frames; i++) {
+      render(((seed0 + i - 1) % 9999) + 1);
+      octx.fillStyle = "#000";                        // GIF has no soft alpha — bake onto black
+      octx.fillRect(0, 0, w, h);
+      octx.drawImage(canvas, 0, 0, w, h);
+      framePixels.push(octx.getImageData(0, 0, w, h).data);
+      btn.textContent = `Rendering ${i + 1}/${frames}…`;
+      await new Promise(r => setTimeout(r, 0));
+    }
+    render(seed0);
+
+    btn.textContent = "Quantizing…";
+    await new Promise(r => setTimeout(r, 0));
+    const sample = [];
+    const stride = Math.max(1, Math.floor((w * h * frames) / 30000)) * 4;
+    for (const data of framePixels)
+      for (let i = 0; i < data.length; i += stride) sample.push(data[i], data[i+1], data[i+2], 255);
+    const palette = quantizePixels(sample, 256);
+    const mapper = makeMapper(palette);
+
+    const frameIdx = framePixels.map((data, fi) => {
+      const idx = new Uint8Array(w * h);
+      for (let p = 0, j = 0; p < data.length; p += 4, j++) idx[j] = mapper(data[p], data[p+1], data[p+2]);
+      btn.textContent = `Encoding ${fi + 1}/${frames}…`;
+      return idx;
+    });
+
+    btn.textContent = "Writing GIF…";
+    await new Promise(r => setTimeout(r, 0));
+    const gif = buildGif(frameIdx, w, h, palette, delayCs);
+    const a = document.createElement("a");
+    a.download = "emoji-ascii-anim.gif";
+    a.href = URL.createObjectURL(new Blob([gif], { type: "image/gif" }));
+    a.click();
+  } catch (err) {
+    console.error(err);
+    flash(btn, "GIF export failed");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Export animation (GIF)";
+  }
+});
+
 buildEmojiPicker();
 applyHash();
 $("color").disabled = $("emojiColors").checked;
 $("message").disabled = $("textMode").value === "random";
+$("wordWrap").disabled = !!uploadedImage;
 $("customChars").disabled = $("charset").value !== "custom";
 syncLabels();
 render();
