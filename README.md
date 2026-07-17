@@ -17,15 +17,16 @@ Open [`index.html`](index.html) in any modern browser — that's it.
 
 ## Features
 
-- **Any emoji** — a built-in emoji keyboard (10 categories) plus a text box so you
-  can paste anything your system font can render. Multi-emoji strings shrink to
-  fit instead of clipping.
+- **Text + emoji** — a multi-line text box you can type into (line breaks are
+  kept and each line is centered), with a built-in emoji keyboard (10 categories)
+  that inserts emoji at the caret. Everything is auto-sized to fill the canvas;
+  turn on **word wrap** to also auto-wrap any single line that's too long.
 - **Photo mode** — upload any image (a headshot works great) and it gets the same
   ASCII treatment; PNGs with transparency keep their silhouette.
 - **Character sets** — Matrix mix, binary, katakana, block shades, or your own
   custom set of characters.
-- **Two color modes** — use the emoji's real colors, or switch to a single picked
-  color with an automatically derived light→dark palette.
+- **Two color modes** — use the source's original colors (emoji or photo), or
+  switch to a single picked color with an automatically derived light→dark palette.
 - **Contrast control** — pushes the dark areas darker (with a gentle lift on the
   brights) so shapes read with more punch.
 - **Hidden text** — three text modes:
@@ -44,14 +45,15 @@ Open [`index.html`](index.html) in any modern browser — that's it.
   ready to paste anywhere monospace.
 - **Share links** — every setting lives in the URL hash, so copying the link
   reproduces the exact image (photos excluded — they can't fit in a URL).
-- **Animation** — a live "shimmer" preview that cycles seeds, and a WebM/MP4
-  export recorded straight off the canvas (no extra libraries).
+- **Animation** — a live "shimmer" preview that cycles seeds, plus a WebM/MP4
+  export recorded straight off the canvas and an animated **GIF** export written
+  by a built-in encoder (median-cut palette + LZW) — no extra libraries.
 
 ## Usage
 
 1. Open `index.html` in a browser.
 2. Pick an emoji from the ⌨️ keyboard or paste one into the box.
-3. Adjust the sliders to taste; toggle **Use emoji colors** for color vs. mono.
+3. Adjust the sliders to taste; toggle **Use original colors** for color vs. mono.
 4. (Optional) Set a **Text mode** and type a message to embed words.
 5. Click **Download JPG** to save the image (always < 1 MB).
 
