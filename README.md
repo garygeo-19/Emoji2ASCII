@@ -1,9 +1,11 @@
 # Emoji2ASCII
 
-Turn any emoji — or a photo — into a glowing field of ASCII characters, right in
+Turn text, emoji, or a photo into a glowing field of ASCII characters, right in
 your browser.
 
-Type or pick an emoji (or upload an image) and Emoji2ASCII rasterizes it, then
+![Emoji2ASCII rendering a smiley as a glowing field of ASCII characters](demo.gif)
+
+Type any text, add emoji, or upload an image and Emoji2ASCII rasterizes it, then
 "paints" the shape with randomized text — in the source's real colors or a single
 Matrix-style hue. You can hide words inside the noise, crank the contrast, and
 export a shareable image, plain text, an animation, or a link that reproduces
@@ -13,7 +15,8 @@ It's a single, dependency-free HTML file. No build step, no server, no tracking.
 
 ## Demo
 
-Open [`index.html`](index.html) in any modern browser — that's it.
+Open [`index.html`](index.html) in any modern browser — that's it. The animation
+above is a GIF exported straight from the app.
 
 ## Features
 
